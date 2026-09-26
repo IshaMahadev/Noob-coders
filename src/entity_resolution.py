@@ -14,6 +14,9 @@ import concurrent.futures
 import hashlib
 import re
 import sqlite3
+import pandas as pd
+import xgboost as xgb
+import difflib
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
@@ -32,6 +35,7 @@ ABBREVIATIONS = {
 }
 TOKEN_RE = re.compile(r"[^\w]+", re.UNICODE)
 _WORKER_DB: sqlite3.Connection | None = None
+_WORKER_MODEL = None
 
 
 def normalize(value: str) -> str:
@@ -237,12 +241,34 @@ def retrieve_batch(db: sqlite3.Connection, batch: list[dict[str, str]], max_per_
         (max_df, max_per_source),
     ).fetchall()
     lists: dict[str, dict[int, list[tuple[str, float]]]] = defaultdict(lambda: {2: [], 3: []})
-    for candidate in ranked:
-        row = by_s1[candidate["s1"]]
-        nj, aj, nc, ac = candidate_features(row, candidate)
-        country_bonus = 0.08 if row.get("country", "") and row.get("country", "") == candidate["country"] else 0.0
-        score = 0.58 * nj + 0.30 * aj + 0.07 * nc + 0.05 * ac + country_bonus
-        lists[candidate["s1"]][candidate["source"]].append((candidate["entity_id"], score))
+    
+    global _WORKER_MODEL
+    if _WORKER_MODEL is not None:
+        features_list = []
+        candidates_meta = []
+        for candidate in ranked:
+            row = by_s1[candidate["s1"]]
+            nj, aj, nc, ac = candidate_features(row, candidate)
+            a_name, a_addr = normalize(row.get("business_name", "")), normalize(row.get("business_address", ""))
+            name_seq = difflib.SequenceMatcher(None, a_name, candidate["name_norm"]).ratio() if a_name or candidate["name_norm"] else 1.0
+            addr_seq = difflib.SequenceMatcher(None, a_addr, candidate["address_norm"]).ratio() if a_addr or candidate["address_norm"] else 1.0
+            country_match = 1 if row.get("country") == candidate["country"] and row.get("country") else 0
+            
+            features_list.append([nj, aj, nc, ac, name_seq, addr_seq, country_match])
+            candidates_meta.append((candidate["s1"], candidate["entity_id"], candidate["source"]))
+
+        if features_list:
+            df = pd.DataFrame(features_list, columns=['name_jaccard', 'addr_jaccard', 'name_contain', 'addr_contain', 'name_seq_sim', 'addr_seq_sim', 'country_match'])
+            scores = _WORKER_MODEL.predict_proba(df)[:, 1]
+            for i, (s1, cand_id, source) in enumerate(candidates_meta):
+                lists[s1][source].append((cand_id, float(scores[i])))
+    else:
+        for candidate in ranked:
+            row = by_s1[candidate["s1"]]
+            nj, aj, nc, ac = candidate_features(row, candidate)
+            country_bonus = 0.08 if row.get("country", "") and row.get("country", "") == candidate["country"] else 0.0
+            score = 0.58 * nj + 0.30 * aj + 0.07 * nc + 0.05 * ac + country_bonus
+            lists[candidate["s1"]][candidate["source"]].append((candidate["entity_id"], score))
     result: dict[str, list[tuple[str, float]]] = {}
     for s1_id in by_s1:
         choices = lists[s1_id]
@@ -255,9 +281,15 @@ def retrieve_batch(db: sqlite3.Connection, batch: list[dict[str, str]], max_per_
 
 
 def initialize_worker(db_path: str) -> None:
-    global _WORKER_DB
+    global _WORKER_DB, _WORKER_MODEL
     _WORKER_DB = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
     _WORKER_DB.row_factory = sqlite3.Row
+    try:
+        _WORKER_MODEL = xgb.XGBClassifier()
+        _WORKER_MODEL.load_model("model.xgb")
+    except Exception as e:
+        print(f"Worker could not load model.xgb: {e}")
+        _WORKER_MODEL = None
 
 
 def worker_retrieve(payload: tuple[list[dict[str, str]], int, int]):
@@ -335,6 +367,12 @@ def run(data_dir: Path, split: str, out_dir: Path, db_path: Path, threshold: flo
                 yield source1_batch
 
         if workers <= 1:
+            global _WORKER_MODEL
+            try:
+                _WORKER_MODEL = xgb.XGBClassifier()
+                _WORKER_MODEL.load_model("model.xgb")
+            except:
+                pass
             for batch in batches():
                 write_found(batch, retrieve_batch(db, batch, max_per_source, max_df))
         else:
