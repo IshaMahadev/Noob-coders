@@ -1,0 +1,1 @@
+# Standard-library-only baseline. No external Python packages are required.
