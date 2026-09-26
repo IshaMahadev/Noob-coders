@@ -2,3 +2,9 @@
 __pycache__/
 *.pyc
 output/
+.agents/
+lazy-senior-dev/
+student_resource/
+dataset/
+training_features.csv
+*.zip
