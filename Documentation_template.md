@@ -1,8 +1,8 @@
 # ML Challenge 2026: Business Entity Resolution Solution Template
 
 **Team Name:** Noob Coders
-**Team Members:** Team Noob Coders
-**Submission Date:** 26 September 2026
+**Team Members:** Isha Mahadev, Arnav Tripathi, Daksh Vyas, Aman Modi
+**Submission Date:** 27 September 2026
 
 ---
 
